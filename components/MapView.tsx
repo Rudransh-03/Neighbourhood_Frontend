@@ -14,9 +14,10 @@ interface Props {
     haptics: boolean;
     tracking: boolean;
   };
+  isDarkMode?: boolean;
 }
 
-export default function MapView({ lat, lng, activeRegion, settings }: Props) {
+export default function MapView({ lat, lng, activeRegion, settings, isDarkMode }: Props) {
   const mapRef = useRef<L.Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
@@ -132,12 +133,20 @@ export default function MapView({ lat, lng, activeRegion, settings }: Props) {
   useEffect(() => {
     if (!mapRef.current) return;
 
-    // 1. Retina Tiles
+    // 1. Retina Tiles (always Voyager; dark mode is handled by CSS filter on the tile pane)
     if (tileLayerRef.current) {
-      const isRetina = settings?.retina !== false; // default true
-      const style = "voyager";
+      const isRetina = settings?.retina !== false;
       const rs = isRetina ? "@2x" : "";
-      tileLayerRef.current.setUrl(`https://{s}.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}${rs}.png`);
+      tileLayerRef.current.setUrl(`https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}${rs}.png`);
+    }
+
+    // Apply dark mode filter to the map tile pane only (not the UI)
+    if (mapRef.current) {
+      const tilePane = mapRef.current.getPane("tilePane");
+      if (tilePane) {
+        tilePane.style.filter = isDarkMode ? "invert(1) hue-rotate(180deg) saturate(2) brightness(1.15) contrast(1.05)" : "none";
+        tilePane.style.transition = "filter 0.5s ease";
+      }
     }
 
     // 2. Traffic Layer
@@ -167,7 +176,7 @@ export default function MapView({ lat, lng, activeRegion, settings }: Props) {
         }
       }
     }
-  }, [settings?.retina, settings?.traffic, activeRegion]);
+  }, [settings?.retina, settings?.traffic, activeRegion, isDarkMode]);
 
   // Cleanup on unmount
   useEffect(() => {
