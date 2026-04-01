@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import InsightsSheet from "@/components/InsightsSheet";
 import CompareSheet from "@/components/CompareSheet";
 import { LocalitySearchResponse } from "./types";
@@ -15,19 +15,31 @@ type LocationState =
   | { status: "success"; lat: number; lng: number; label?: string }
   | { status: "error"; message: string };
 
-const POPULAR_AREAS = [
-  "Indiranagar",
-  "HSR Layout",
-  "Viman Nagar",
-  "Koramangala",
-  "Whitefield",
-];
+const POPULAR_AREAS_BY_CITY: Record<string, string[]> = {
+  "Bengaluru": ["Indiranagar", "HSR Layout", "Koramangala", "Whitefield", "Jayanagar"],
+  "Bangalore": ["Indiranagar", "HSR Layout", "Koramangala", "Whitefield", "Jayanagar"],
+  "Mumbai": ["Bandra", "Andheri", "Powai", "Juhu", "Lower Parel"],
+  "Delhi": ["Connaught Place", "Hauz Khas", "Dwarka", "Saket", "Lajpat Nagar"],
+  "New Delhi": ["Connaught Place", "Hauz Khas", "Dwarka", "Saket", "Lajpat Nagar"],
+  "Gurugram": ["DLF Cyber City", "Sohna Road", "Golf Course Road", "Sector 56", "MG Road, Gurgaon"],
+  "Gurgaon": ["DLF Cyber City", "Sohna Road", "Golf Course Road", "Sector 56", "MG Road, Gurgaon"],
+  "Noida": ["Sector 18", "Sector 62", "Sector 137", "Greater Noida West", "Sector 50"],
+  "Ghaziabad": ["Indirapuram", "Vaishali", "Raj Nagar Extension", "Crossing Republik", "Kaushambi"],
+  "Pune": ["Koregaon Park", "Viman Nagar", "Hinjewadi", "Kothrud", "Baner"],
+  "Hyderabad": ["Banjara Hills", "Gachibowli", "Madhapur", "Jubilee Hills", "Hitech City"],
+  "Chennai": ["T Nagar", "Adyar", "Anna Nagar", "Velachery", "OMR"],
+  "Kolkata": ["Salt Lake", "New Town", "Park Street", "Ballygunge", "Rajarhat"],
+  "Jaipur": ["Malviya Nagar", "Vaishali Nagar", "Mansarovar", "C-Scheme", "Tonk Road"],
+  "default": ["Indiranagar", "HSR Layout", "Koramangala", "Whitefield", "Jayanagar"],
+};
 
 // Default centre shown before user grants location
 const DEFAULT_LAT = 12.9716;
 const DEFAULT_LNG = 77.5946;
 
 export default function Home() {
+  const queryCache = useRef<Record<string, LocalitySearchResponse>>({});
+
   const [location, setLocation] = useState<LocationState>({ status: "idle" });
   const [search, setSearch] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -36,8 +48,11 @@ export default function Home() {
   const [compareRegion, setCompareRegion] = useState<LocalitySearchResponse | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [detectedCity, setDetectedCity] = useState<string>("default");
+  const [isReviewPanelOpen, setIsReviewPanelOpen] = useState(false);
+  const [myReviews, setMyReviews] = useState<{regionName: string; rating: number; text: string; date: string}[]>([]);
   const [userSettings, setUserSettings] = useState({
     traffic: false,
     retina: true,
@@ -58,6 +73,22 @@ export default function Home() {
 
   const searchLocality = async (query: string, isCompare = false) => {
     if (!query.trim()) return;
+
+    const cacheKey = typeof query === 'string' ? query.trim().toLowerCase() : query;
+    if (queryCache.current[cacheKey]) {
+      console.log(`[NI] Serving '${query}' from frontend cache`);
+      if (isCompare) {
+        triggerHaptic(20);
+        setCompareRegion(queryCache.current[cacheKey]);
+        setCurrentView("COMPARE");
+      } else {
+        triggerHaptic(20);
+        setActiveRegion(queryCache.current[cacheKey]);
+        setCurrentView("INSIGHTS");
+      }
+      return;
+    }
+
     setSearchLoading(true);
     try {
       const res = await fetch("http://localhost:8080/api/locality/search", {
@@ -68,6 +99,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (data.success && data.data) {
+        queryCache.current[cacheKey] = data.data; // Save to cache
         if (isCompare) {
           triggerHaptic(20);
           setCompareRegion(data.data);
@@ -98,6 +130,9 @@ export default function Home() {
     }
 
     setLocation({ status: "loading" });
+    // Clear any active search so the map can fly to user's real GPS position
+    setActiveRegion(null);
+    setCurrentView("HOME");
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
@@ -110,10 +145,14 @@ export default function Home() {
             `https://photon.komoot.io/reverse?lat=${latitude}&lon=${longitude}`
           );
           const data = await res.json();
-          label =
-            data.features?.[0]?.properties?.suburb ||
-            data.features?.[0]?.properties?.city ||
-            data.features?.[0]?.properties?.name;
+          const props = data.features?.[0]?.properties;
+          label = props?.suburb || props?.city || props?.name;
+
+          // Detect city for dynamic popular areas
+          const city = props?.city || props?.county || props?.state || "default";
+          console.log("[NI] Detected location properties:", JSON.stringify(props));
+          console.log("[NI] Resolved city for popular areas:", city);
+          setDetectedCity(city);
         } catch {
           // label stays undefined — no big deal
         }
@@ -157,9 +196,7 @@ export default function Home() {
       position: "relative", 
       height: "100dvh", 
       overflow: "hidden",
-      filter: isDarkMode ? "invert(1) hue-rotate(180deg)" : "none",
-      transition: "filter 0.5s cubic-bezier(0.16, 1, 0.3, 1)",
-      backgroundColor: isDarkMode ? "#111" : "#fff"
+      backgroundColor: "#000"
     }}>
       {/* Toast Notification */}
       <div style={{
@@ -176,14 +213,8 @@ export default function Home() {
       </div>
 
       {/* Full-screen real Leaflet map */}
-      <MapView lat={mapLat} lng={mapLng} activeRegion={activeRegion} settings={userSettings} />
+      <MapView lat={mapLat} lng={mapLng} activeRegion={activeRegion} settings={userSettings} isDarkMode={isDarkMode} />
 
-      {/* Re-invert any explicit photographs that shouldn't be color inverted (like the user avatar V) */}
-      <style>{`
-        .force-no-invert {
-          filter: ${isDarkMode ? "invert(1) hue-rotate(180deg)" : "none"} !important;
-        }
-      `}</style>
 
       {/* Overlay UI — glassmorphism cards over the map */}
       <div
@@ -199,229 +230,252 @@ export default function Home() {
       >
         {currentView === "HOME" && (
           <>
-            {/* ── TOP CARD ── */}
-        <div
-          className="glass-card slide-up"
-          style={{
-            margin: "20px 16px 0",
-            borderRadius: "20px",
-            padding: "20px 20px 16px",
-            pointerEvents: "all",
-          }}
-        >
-          {/* Nav row */}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "16px",
-            }}
-          >
-            <button
-              aria-label="Menu"
-              onClick={() => setIsMenuOpen(true)}
-              style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}
-            >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round">
-                <line x1="3" y1="6" x2="21" y2="6" />
-                <line x1="3" y1="12" x2="21" y2="12" />
-                <line x1="3" y1="18" x2="21" y2="18" />
-              </svg>
-            </button>
-            <button
-              aria-label="Search"
-              style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}
-            >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round">
-                <circle cx="11" cy="11" r="8" />
-                <line x1="21" y1="21" x2="16.65" y2="16.65" />
-              </svg>
-            </button>
-          </div>
+            {/* ── Gradient vignettes for cinematic map look ── */}
+            <div className="top-vignette" />
+            <div className="bottom-vignette" />
 
-          {/* Title */}
-          <h1
-            style={{
-              fontFamily: "'Georgia', serif",
-              fontSize: "26px",
-              fontWeight: 700,
-              color: "#111827",
-              lineHeight: 1.2,
-              marginBottom: "4px",
-            }}
-          >
-            Neighborhood Intelligence
-          </h1>
-          <p style={{ fontSize: "14px", color: "#6b7280", marginBottom: "20px" }}>
-            Find the best places to live in your city
-          </p>
-
-          {/* Search bar */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              background: "#f3f4f6",
-              borderRadius: "12px",
-              padding: "10px 14px",
-              gap: "10px",
-              marginBottom: "12px",
-            }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2" strokeLinecap="round">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search locality (e.g., HSR Layout)"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && searchLocality(search)}
+            {/* ── TOP BAR: Floating nav icons ── */}
+            <div
+              className="fade-in"
               style={{
-                flex: 1,
-                background: "none",
-                border: "none",
-                outline: "none",
-                fontSize: "15px",
-                color: "#374151",
-              }}
-            />
-            <button
-              onClick={() => searchLocality(search)}
-              style={{
-                background: "#3b82f6",
-                border: "none",
-                borderRadius: "8px",
-                width: "30px",
-                height: "30px",
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                zIndex: 20,
                 display: "flex",
+                justifyContent: "space-between",
                 alignItems: "center",
-                justifyContent: "center",
-                cursor: "pointer",
-                flexShrink: 0,
+                padding: "20px 24px",
+                pointerEvents: "all",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Use my location button */}
-          <button
-            onClick={requestLocation}
-            disabled={location.status === "loading"}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              width: "100%",
-              padding: "11px 0",
-              borderRadius: "50px",
-              background:
-                location.status === "loading"
-                  ? "#e5e7eb"
-                  : location.status === "success"
-                  ? "#dcfce7"
-                  : "#fff",
-              border: "1.5px solid #e5e7eb",
-              cursor: location.status === "loading" ? "wait" : "pointer",
-              fontSize: "15px",
-              fontWeight: 600,
-              color: location.status === "success" ? "#16a34a" : "#374151",
-              transition: "all 0.25s ease",
-            }}
-          >
-            {location.status === "loading" ? (
-              <>
-                <SpinnerIcon />
-                Locating you…
-              </>
-            ) : location.status === "success" ? (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                {(location as any).label ?? "Location found"}
-              </>
-            ) : (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="3 11 22 2 13 21 11 13 3 11" />
-                </svg>
-                Use my location
-              </>
-            )}
-          </button>
-
-          {location.status === "error" && (
-            <p style={{ marginTop: "10px", fontSize: "13px", color: "#dc2626", textAlign: "center" }}>
-              {location.message}
-            </p>
-          )}
-        </div>
-
-        {/* ── BOTTOM CARD ── */}
-        <div
-          className="glass-card slide-up-delay-2"
-          style={{
-            margin: "0 16px 24px",
-            borderRadius: "20px",
-            padding: "18px 20px",
-            pointerEvents: "all",
-          }}
-        >
-          <p
-            style={{
-              fontFamily: "'Georgia', serif",
-              fontSize: "17px",
-              fontWeight: 700,
-              color: "#111827",
-              marginBottom: "12px",
-            }}
-          >
-            Popular areas:
-          </p>
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {POPULAR_AREAS.map((area) => (
               <button
-                key={area}
-                onClick={() => { triggerHaptic(); searchLocality(area); }}
-                disabled={searchLoading}
+                aria-label="Menu"
+                onClick={() => setIsMenuOpen(true)}
                 style={{
-                  padding: "6px 14px",
-                  borderRadius: "50px",
-                  background: "#fff",
-                  border: "1.5px solid #e5e7eb",
-                  fontSize: "14px",
-                  color: "#374151",
+                  background: "rgba(255,255,255,0.15)",
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  borderRadius: "14px",
+                  width: "44px",
+                  height: "44px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
                   cursor: "pointer",
-                  whiteSpace: "nowrap",
                   transition: "all 0.2s ease",
                 }}
-                onMouseEnter={(e) => {
-                  const b = e.currentTarget;
-                  b.style.background = "#3b82f6";
-                  b.style.color = "#fff";
-                  b.style.borderColor = "#3b82f6";
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.3)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.15)"; }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round">
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+              </button>
+
+              {/* Location button — large, prominent GPS icon */}
+              <button
+                onClick={requestLocation}
+                style={{
+                  background: location.status === "success" ? "rgba(16,185,129,0.25)" : "rgba(255,255,255,0.15)",
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
+                  border: `1.5px solid ${location.status === "success" ? "rgba(16,185,129,0.5)" : "rgba(255,255,255,0.25)"}`,
+                  borderRadius: "14px",
+                  width: "44px",
+                  height: "44px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: location.status === "loading" ? "wait" : "pointer",
+                  transition: "all 0.25s ease",
                 }}
-                onMouseLeave={(e) => {
-                  const b = e.currentTarget;
-                  b.style.background = "#fff";
-                  b.style.color = "#374151";
-                  b.style.borderColor = "#e5e7eb";
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.3)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = location.status === "success" ? "rgba(16,185,129,0.25)" : "rgba(255,255,255,0.15)"; }}
+              >
+                {location.status === "loading" ? (
+                  <SpinnerIcon />
+                ) : (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={location.status === "success" ? "#34d399" : "#fff"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    {/* GPS crosshair icon */}
+                    <circle cx="12" cy="12" r="4" />
+                    <line x1="12" y1="2" x2="12" y2="6" />
+                    <line x1="12" y1="18" x2="12" y2="22" />
+                    <line x1="2" y1="12" x2="6" y2="12" />
+                    <line x1="18" y1="12" x2="22" y2="12" />
+                  </svg>
+                )}
+              </button>
+            </div>
+
+            {/* ── BOTTOM PANEL: Branding + Search + Popular Areas ── */}
+            <div
+              className="slide-up"
+              style={{
+                position: "absolute",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                zIndex: 20,
+                padding: "0 20px 28px",
+                pointerEvents: "all",
+              }}
+            >
+              {/* Brand */}
+              <div style={{ marginBottom: "20px" }}>
+                <p style={{
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  color: "rgba(255,255,255,0.6)",
+                  letterSpacing: "2px",
+                  textTransform: "uppercase",
+                  marginBottom: "6px",
+                }}>
+                  Discover & Compare
+                </p>
+                <h1 style={{
+                  fontFamily: "'Playfair Display', Georgia, serif",
+                  fontSize: "clamp(28px, 6vw, 42px)",
+                  fontWeight: 800,
+                  color: "#fff",
+                  lineHeight: 1.1,
+                  textShadow: "0 2px 20px rgba(0,0,0,0.3)",
+                }}>
+                  Neighborhood<br/>Intelligence
+                </h1>
+                <p style={{
+                  fontSize: "15px",
+                  color: "rgba(255,255,255,0.7)",
+                  marginTop: "8px",
+                  maxWidth: "360px",
+                  lineHeight: 1.4,
+                }}>
+                  AI-powered insights for every locality. Search any area to explore scores, facilities & traffic.
+                </p>
+              </div>
+
+              {/* Search bar */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  background: "rgba(255,255,255,0.12)",
+                  backdropFilter: "blur(20px)",
+                  WebkitBackdropFilter: "blur(20px)",
+                  borderRadius: "16px",
+                  padding: "6px 6px 6px 18px",
+                  gap: "10px",
+                  marginBottom: "16px",
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  transition: "all 0.3s ease",
+                  boxShadow: "0 4px 24px rgba(0,0,0,0.15)",
                 }}
               >
-                {area}
-              </button>
-            ))}
-          </div>
-        </div>
-        </>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth="2" strokeLinecap="round">
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search any locality…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && searchLocality(search)}
+                  style={{
+                    flex: 1,
+                    background: "none",
+                    border: "none",
+                    outline: "none",
+                    fontSize: "15px",
+                    color: "#fff",
+                    fontWeight: 500,
+                  }}
+                />
+                <button
+                  onClick={() => searchLocality(search)}
+                  disabled={searchLoading}
+                  style={{
+                    background: searchLoading
+                      ? "rgba(59,130,246,0.5)"
+                      : "linear-gradient(135deg, #3b82f6, #6366f1)",
+                    border: "none",
+                    borderRadius: "12px",
+                    padding: "12px 20px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: searchLoading ? "wait" : "pointer",
+                    flexShrink: 0,
+                    transition: "all 0.2s ease",
+                    boxShadow: "0 4px 12px rgba(59,130,246,0.4)",
+                  }}
+                  onMouseEnter={(e) => { if (!searchLoading) e.currentTarget.style.transform = "scale(1.05)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; }}
+                >
+                  {searchLoading ? (
+                    <SpinnerIcon />
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                      <polyline points="12 5 19 12 12 19" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+
+              {/* Popular area chips */}
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                {(POPULAR_AREAS_BY_CITY[detectedCity] || POPULAR_AREAS_BY_CITY["default"]).map((area: string, i: number) => (
+                  <button
+                    key={area}
+                    onClick={() => { triggerHaptic(); searchLocality(area); }}
+                    disabled={searchLoading}
+                    className={`slide-up-delay-${Math.min(i + 1, 3)}`}
+                    style={{
+                      padding: "8px 16px",
+                      borderRadius: "50px",
+                      background: "rgba(255,255,255,0.12)",
+                      backdropFilter: "blur(8px)",
+                      WebkitBackdropFilter: "blur(8px)",
+                      border: "1px solid rgba(255,255,255,0.2)",
+                      fontSize: "13px",
+                      fontWeight: 500,
+                      color: "rgba(255,255,255,0.85)",
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                      transition: "all 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
+                    }}
+                    onMouseEnter={(e) => {
+                      const b = e.currentTarget;
+                      b.style.background = "rgba(255,255,255,0.25)";
+                      b.style.color = "#fff";
+                      b.style.transform = "translateY(-2px)";
+                      b.style.boxShadow = "0 6px 20px rgba(0,0,0,0.2)";
+                    }}
+                    onMouseLeave={(e) => {
+                      const b = e.currentTarget;
+                      b.style.background = "rgba(255,255,255,0.12)";
+                      b.style.color = "rgba(255,255,255,0.85)";
+                      b.style.transform = "translateY(0)";
+                      b.style.boxShadow = "none";
+                    }}
+                  >
+                    {area}
+                  </button>
+                ))}
+              </div>
+
+              {location.status === "error" && (
+                <p style={{ marginTop: "12px", fontSize: "13px", color: "#fca5a5", textAlign: "center" }}>
+                  {location.message}
+                </p>
+              )}
+            </div>
+          </>
         )}
       </div>
 
@@ -429,7 +483,9 @@ export default function Home() {
         <InsightsSheet 
           region={activeRegion}
           onClose={() => setCurrentView("HOME")}
-          onCompare={() => searchLocality("Koramangala", true)} 
+          onCompare={() => searchLocality("Koramangala", true)}
+          onReviewSubmit={(review) => setMyReviews(prev => [review, ...prev])}
+          isDarkMode={isDarkMode}
         />
       )}
       {currentView === "COMPARE" && activeRegion && compareRegion && (
@@ -469,7 +525,7 @@ export default function Home() {
           width: "300px",
           maxWidth: "80%",
           height: "100%",
-          background: "rgba(255, 255, 255, 0.85)",
+          background: isDarkMode ? "rgba(24, 24, 27, 0.92)" : "rgba(255, 255, 255, 0.85)",
           backdropFilter: "blur(20px)",
           boxShadow: isMenuOpen ? "0 0 40px rgba(0,0,0,0.15)" : "none",
           zIndex: 50,
@@ -484,7 +540,7 @@ export default function Home() {
           <button
             onClick={() => { triggerHaptic(10); setIsMenuOpen(false); }}
             style={{
-              background: "rgba(0,0,0,0.05)",
+              background: isDarkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)",
               border: "none",
               borderRadius: "50%",
               width: "36px",
@@ -495,10 +551,10 @@ export default function Home() {
               cursor: "pointer",
               transition: "background 0.2s ease",
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(0,0,0,0.1)")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(0,0,0,0.05)")}
+            onMouseEnter={(e) => (e.currentTarget.style.background = isDarkMode ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.1)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = isDarkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)")}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={isDarkMode ? "#a1a1aa" : "#374151"} strokeWidth="2" strokeLinecap="round">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
@@ -521,10 +577,10 @@ export default function Home() {
           }}>
             V
           </div>
-          <h2 style={{ fontFamily: "'Georgia', serif", fontSize: "22px", color: "#111827", margin: "0 0 4px" }}>
+          <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: "22px", color: isDarkMode ? "#f4f4f5" : "#111827", margin: "0 0 4px" }}>
             Hey, Vipul
           </h2>
-          <p style={{ color: "#6b7280", fontSize: "14px", margin: 0 }}>Discover your city</p>
+          <p style={{ color: isDarkMode ? "#71717a" : "#6b7280", fontSize: "14px", margin: 0 }}>Discover your city</p>
         </div>
 
         <div style={{ marginTop: "30px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -544,13 +600,12 @@ export default function Home() {
                 } else if (item.label === "Settings") {
                   setIsSettingsOpen(true);
                   setIsMenuOpen(false);
+                } else if (item.label === "My Reviews") {
+                  setIsReviewPanelOpen(true);
+                  setIsMenuOpen(false);
                 } else {
-                  const msgs: Record<string, string> = {
-                    "Saved Places": "You haven't saved any places yet!",
-                    "My Reviews": "Loading your reviews...",
-                  };
-                  showToast(msgs[item.label] || "Coming soon!");
-                  setIsMenuOpen(false); // smoothly close sidebar
+                  showToast("Coming soon!");
+                  setIsMenuOpen(false);
                 }
               }}
               style={{
@@ -564,23 +619,23 @@ export default function Home() {
                 borderRadius: "14px",
                 fontSize: "16px",
                 fontWeight: 500,
-                color: "#4b5563",
+                color: isDarkMode ? "#a1a1aa" : "#4b5563",
                 cursor: "pointer",
                 transition: "all 0.2s ease",
                 textAlign: "left",
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = "rgba(0,0,0,0.04)";
-                e.currentTarget.style.color = "#111827";
+                e.currentTarget.style.background = isDarkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)";
+                e.currentTarget.style.color = isDarkMode ? "#f4f4f5" : "#111827";
                 (e.currentTarget.firstChild as HTMLElement).style.stroke = "#3b82f6";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "transparent";
-                e.currentTarget.style.color = "#4b5563";
-                (e.currentTarget.firstChild as HTMLElement).style.stroke = "#6b7280";
+                e.currentTarget.style.color = isDarkMode ? "#a1a1aa" : "#4b5563";
+                (e.currentTarget.firstChild as HTMLElement).style.stroke = isDarkMode ? "#71717a" : "#6b7280";
               }}
             >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transition: "stroke 0.2s" }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={isDarkMode ? "#71717a" : "#6b7280"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transition: "stroke 0.2s" }}>
                 <path d={item.icon} />
               </svg>
               {item.label}
@@ -589,9 +644,124 @@ export default function Home() {
         </div>
 
         <div style={{ marginTop: "auto" }}>
-          <p style={{ fontSize: "12px", color: "#9ca3af", textAlign: "center" }}>
+          <p style={{ fontSize: "12px", color: isDarkMode ? "#52525b" : "#9ca3af", textAlign: "center" }}>
             v0.1.0 • Neighbourhood Intelligence
           </p>
+        </div>
+      </div>
+
+      {/* ── MY REVIEWS PANEL ── */}
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          background: "rgba(0, 0, 0, 0.35)",
+          backdropFilter: "blur(12px)",
+          zIndex: 100,
+          opacity: isReviewPanelOpen ? 1 : 0,
+          pointerEvents: isReviewPanelOpen ? "all" : "none",
+          transition: "opacity 0.4s ease",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "20px"
+        }}
+        onClick={() => setIsReviewPanelOpen(false)}
+      >
+        <div
+          style={{
+            background: isDarkMode ? "rgba(24, 24, 27, 0.95)" : "rgba(255,255,255,0.95)",
+            backdropFilter: "blur(24px)",
+            borderRadius: "24px",
+            padding: "32px",
+            maxWidth: "500px",
+            width: "100%",
+            maxHeight: "80vh",
+            overflowY: "auto",
+            boxShadow: "0 25px 50px rgba(0,0,0,0.25)",
+            transform: isReviewPanelOpen ? "scale(1) translateY(0)" : "scale(0.95) translateY(20px)",
+            transition: "transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
+            <h2 style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: "24px",
+              fontWeight: 800,
+              color: isDarkMode ? "#f4f4f5" : "#111827",
+              margin: 0,
+            }}>My Reviews</h2>
+            <button
+              onClick={() => setIsReviewPanelOpen(false)}
+              style={{
+                background: isDarkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)",
+                border: "none",
+                borderRadius: "50%",
+                width: "36px",
+                height: "36px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={isDarkMode ? "#a1a1aa" : "#374151"} strokeWidth="2" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+
+          {myReviews.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 0" }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke={isDarkMode ? "#3f3f46" : "#d1d5db"} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: "0 auto 16px" }}>
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+              <p style={{ color: isDarkMode ? "#71717a" : "#9ca3af", fontSize: "15px", marginBottom: "8px" }}>
+                No reviews yet
+              </p>
+              <p style={{ color: isDarkMode ? "#52525b" : "#d1d5db", fontSize: "13px" }}>
+                Search for a locality and write your first review!
+              </p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              {myReviews.map((review, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    background: isDarkMode ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.03)",
+                    borderRadius: "16px",
+                    padding: "16px 20px",
+                    border: `1px solid ${isDarkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)"}`,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontWeight: 600, fontSize: "15px", color: isDarkMode ? "#f4f4f5" : "#111827" }}>
+                      {review.regionName}
+                    </span>
+                    <span style={{ fontSize: "12px", color: isDarkMode ? "#52525b" : "#9ca3af" }}>
+                      {review.date}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: "2px", marginBottom: "8px" }}>
+                    {[1,2,3,4,5].map((s) => (
+                      <svg key={s} width="16" height="16" viewBox="0 0 24 24" fill={s <= review.rating ? "#f59e0b" : "none"} stroke="#f59e0b" strokeWidth="2">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                      </svg>
+                    ))}
+                  </div>
+                  <p style={{ color: isDarkMode ? "#a1a1aa" : "#4b5563", fontSize: "14px", lineHeight: 1.5, margin: 0 }}>
+                    {review.text}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
